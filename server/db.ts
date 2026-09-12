@@ -1,92 +1,68 @@
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
-import { ENV } from './_core/env';
+import { MongoClient, ObjectId, type Db } from "mongodb";
+import { ENV } from "./_core/env";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+let client: MongoClient | null = null;
+let database: Db | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
-  }
-  return _db;
+function mongoUri() {
+  return process.env.MONGODB_URI ?? "";
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
-  }
+export async function getDb(): Promise<Db | null> {
+  if (database) return database;
+  const uri = mongoUri();
+  if (!uri) return null;
+  client = new MongoClient(uri, { serverSelectionTimeoutMS: 8000 });
+  await client.connect();
+  database = client.db(process.env.MONGODB_DB || undefined);
+  await database.collection("application_connections").createIndex({ updatedAt: -1 });
+  await database.collection("activity_log").createIndex({ createdAt: -1 });
+  return database;
+}
 
+export async function closeDb() {
+  await client?.close();
+  client = null;
+  database = null;
+}
+
+export async function upsertUser() {
+  // Kept as a no-op compatibility export for unused scaffold files. Authentication is disabled.
+}
+
+function publicConnection(document: any) {
+  if (!document) return undefined;
+  const { apiKeyHash: _hash, apiKeyCiphertext: _ciphertext, ...safe } = document;
+  return { ...safe, id: String(document._id) };
+}
+
+export async function listConnections() {
   const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
-  }
-
-  try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
-
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
-    }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
-  } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
-    throw error;
-  }
+  if (!db) return [];
+  const rows = await db.collection("application_connections").find({}).sort({ updatedAt: -1 }).toArray();
+  return rows.map(publicConnection);
 }
 
-export async function getUserByOpenId(openId: string) {
+export async function getConnection(id: string) {
   const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user: database not available");
-    return undefined;
-  }
-
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-
-  return result.length > 0 ? result[0] : undefined;
+  if (!db || !ObjectId.isValid(id)) return undefined;
+  return db.collection("application_connections").findOne({ _id: new ObjectId(id) });
 }
 
-// TODO: add feature queries here as your schema grows.
+export async function listActivity(limit = 30) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.collection("activity_log").find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+}
+
+export async function ensureIndexes() {
+  const db = await getDb();
+  if (!db) return;
+  await Promise.all([
+    db.collection("application_connections").createIndex({ apiKeyHash: 1 }, { unique: true }),
+    db.collection("application_connections").createIndex({ updatedAt: -1 }),
+    db.collection("activity_log").createIndex({ createdAt: -1 }),
+  ]);
+}
+
+export { ENV };
