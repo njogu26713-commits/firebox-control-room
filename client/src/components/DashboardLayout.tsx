@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Activity, AppWindow, BarChart3, Boxes, KeyRound, LayoutDashboard, Menu, Settings2, ShieldCheck } from "lucide-react";
+import { Activity, AppWindow, BarChart3, Boxes, BrainCircuit, KeyRound, LayoutDashboard, Menu, Settings2, ShieldCheck } from "lucide-react";
 import { useLocation } from "wouter";
 
 const items = [
@@ -8,6 +8,7 @@ const items = [
   { label: "Databases", icon: Boxes, path: "/databases" },
   { label: "Statistics", icon: BarChart3, path: "/statistics" },
   { label: "Activity", icon: Activity, path: "/activity" },
+  { label: "AI Support", icon: BrainCircuit, path: "/ai-support" },
   { label: "API Keys", icon: KeyRound, path: "/api-keys" },
   { label: "Settings", icon: Settings2, path: "/settings" },
 ];

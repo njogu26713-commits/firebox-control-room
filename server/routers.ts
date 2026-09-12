@@ -2,6 +2,7 @@ import axios from "axios";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { getConnection, getDb, listActivity, listConnections } from "./db";
+import { ENV } from "./_core/env";
 import { publicProcedure, router } from "./_core/trpc";
 
 const timeout = 9000;
@@ -48,6 +49,28 @@ export const appRouter = router({
   controlRoom: router({
     connections: publicProcedure.query(() => listConnections()),
     activity: publicProcedure.input(z.object({ limit: z.number().int().min(1).max(100).default(30) }).optional()).query(({ input }) => listActivity(input?.limit ?? 30)),
+    aiSupport: publicProcedure.input(z.object({ connectionId: z.string().min(1), question: z.string().trim().min(2).max(2000) })).mutation(async ({ input }) => {
+      if (!ENV.groqApiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
+      const connection = await getConnection(input.connectionId); if (!connection) throw new Error("Application connection not found.");
+      try {
+        const inspected = await inspectRemote(connection.apiUrl, keyDecipher(connection.apiKeyCiphertext));
+        const lowerQuestion = input.question.toLowerCase();
+        const mentioned = inspected.collections.filter(item => lowerQuestion.includes(item.name.toLowerCase())).slice(0, 3);
+        const targets = mentioned.length ? mentioned : inspected.collections.slice(0, 3);
+        const samples = await Promise.all(targets.map(async item => {
+          try {
+            const response = await remoteGet(connection, `/api/firebox/database/collections/${encodeURIComponent(item.name)}/records`, { page: 1, pageSize: 5 });
+            const data = response.data; return { collection: item.name, reportedCount: item.count, sampleRecords: data.records ?? data.data ?? (Array.isArray(data) ? data : []) };
+          } catch { return { collection: item.name, reportedCount: item.count, sampleRecords: [], unavailable: true }; }
+        }));
+        const context = JSON.stringify({ application: connection.appName, apiVersion: connection.apiVersion, databaseType: connection.databaseType, collectionCount: inspected.collections.length, totalRecords: inspected.records, collections: inspected.collections, samples }, null, 2).slice(0, 50000);
+        const response = await axios.post("https://api.groq.com/openai/v1/chat/completions", { model: ENV.groqModel, temperature: 0.2, messages: [
+          { role: "system", content: "You are Firebox AI Support. Answer only from the supplied live database context. Be precise, explain when data is unavailable, and never invent fields, counts, or records. You are read-only: never suggest that the Control Room can edit, delete, or mutate data. Mention the relevant collection names when useful. Use concise Markdown." },
+          { role: "user", content: `Database context:\n${context}\n\nAdministrator question:\n${input.question}` },
+        ] }, { headers: { Authorization: `Bearer ${ENV.groqApiKey}`, "Content-Type": "application/json" }, timeout: 30000 });
+        return { answer: response.data?.choices?.[0]?.message?.content ?? "Groq returned no answer.", model: ENV.groqModel, collectionsUsed: targets.map(item => item.name) };
+      } catch (error: any) { throw new Error(error?.response?.data?.error?.message ?? error?.message ?? "AI Support could not answer this question."); }
+    }),
     connect: publicProcedure.input(connectionInput).mutation(async ({ input }) => {
       try {
         const inspected = await inspectRemote(input.apiUrl, input.apiKey); const db = await getDb();
